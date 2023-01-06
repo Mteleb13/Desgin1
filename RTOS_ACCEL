@@ -1,0 +1,732 @@
+#include "Arduino_FreeRTOS.h"
+#include "semphr.h"
+#include <AccelStepper.h>
+#include <Servo.h>
+#include <EtherCard.h>
+
+Servo gripper;  // create servo object to control a servo
+int pos = 0;    // variable to store the servo position
+int State = 1;
+int Home_state_z = 0;
+int enable=0;
+#define Y_STEP_PIN 60
+#define Y_DIR_PIN 61
+#define Y_ENABLE_PIN 56
+#define Y_MIN_PIN 14
+
+#define X_STEP_PIN 54
+#define X_DIR_PIN 55
+#define X_ENABLE_PIN 38
+#define X_MIN_PIN 15
+
+#define Z_STEP_PIN 46
+#define Z_DIR_PIN 48
+#define Z_ENABLE_PIN 62
+#define Z_MIN_PIN 18
+
+#define CONVEYOR_STEP_PIN 26
+#define CONVEYOR_DIR_PIN 28
+#define CONVEYOR_ENABLE_PIN 24
+
+#define IR_FEEDER 11
+#define IR_CAMERA 6
+#define IR_ARM 5
+#define IR_IN_FEEDER 57
+
+
+#define FEEDER_RELAY 42
+
+#define CYLINDER 1
+#define CUBE 0
+int Product = 0;
+
+int Cylinder_counter = -1;
+int Cube_counter = -1;
+
+
+int FEEDER_STATE = 0;
+String incomingByte;
+
+AccelStepper stepperX(AccelStepper::DRIVER, 54, 55);  // Defaults to AccelStepper::FULL4WIRE (4 pins) on 2, 3, 4, 5
+AccelStepper stepperY(AccelStepper::DRIVER, 60, 61);  // Defaults to AccelStepper::FULL4WIRE (4 pins) on 2, 3, 4, 5
+AccelStepper stepperZ(AccelStepper::DRIVER, 46, 48);  // Defaults to AccelStepper::FULL4WIRE (4 pins) on 2, 3, 4, 5
+AccelStepper conveyor(AccelStepper::DRIVER, 26, 28);  // Defaults to AccelStepper::FULL4WIRE (4 pins) on 2, 3, 4, 5
+
+int POS[2][4][2];
+
+char textToSend[100];
+
+void MoveHome();
+void Drop(int Xpos, int Ypos);
+void CheckToSend(int Product_Type, int Counter_Type);
+
+SemaphoreHandle_t CONV2_ARM_semaphore;
+SemaphoreHandle_t CONV1_CAMERA_semaphore;
+SemaphoreHandle_t CAMERA_CONV2_semaphore;
+SemaphoreHandle_t FEEDER_CONV1_semaphore;
+
+SemaphoreHandle_t interruptSemaphoreON;
+// SemaphoreHandle_t interruptSemaphoreOFF;
+
+/* Addresses */
+// mac address
+static byte mymac[] = { 0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F };
+// ethernet interface ip address
+static byte myip[] = { 192, 168, 1, 2 };
+// gateway ip address
+static byte gwip[] = { 192, 168, 1, 1 };
+// subnet mask
+static byte mask[] = { 255, 255, 255, 0 };
+// destination ip-address
+static byte dstIp[] = { 192, 168, 1, 3 };
+// ports
+const int dstPort PROGMEM = 1234;
+const int srcPort PROGMEM = 4321;
+
+/* Data to send via Ethernet */
+//char textToSend[] = "hiiiii";
+
+
+/* Buffer and timer */
+byte Ethernet::buffer[200];
+static uint32_t timer;  // dummy incrementor that'll later be used for delays
+
+
+/* Ethernet peripheral initialization function */
+void initializeEthernet() {
+  // Begin Ethernet communication
+  if (ether.begin(sizeof Ethernet::buffer, mymac, SS) == 0) {
+    Serial.println("Failed to access Ethernet controller");
+    return;
+  }
+
+  // Setup static IP address
+  ether.staticSetup(myip, gwip, 0, mask);
+
+  // Log configuration
+  // Serial.println(F("\n[Sender]"));
+  // ether.printIp("IP:  ", ether.myip);
+  // ether.printIp("GW:  ", ether.gwip);
+}
+void Sender(char textToSend[100]) {
+  //initializeEthernet();
+  // Serial.println(F("\n[Sender]"));
+  // ether.printIp("IP:  ", ether.myip);
+  // ether.printIp("GW:  ", ether.gwip);
+  if (millis() > timer) {
+    timer = millis() + 100;
+
+    ether.sendUdp(
+      textToSend,
+      8,
+      srcPort,
+      dstIp,
+      dstPort);
+  }
+}
+
+void setup() {
+  // put your setup code here, to run once:
+  Serial.begin(9600);
+
+  initializeEthernet();
+
+  pinMode(2, INPUT_PULLUP);
+  pinMode(3, INPUT_PULLUP);
+
+  pinMode(X_MIN_PIN, INPUT_PULLUP);
+  pinMode(Y_MIN_PIN, INPUT_PULLUP);
+  pinMode(Z_MIN_PIN, INPUT_PULLUP);
+
+  pinMode(IR_FEEDER, INPUT);     // sensor pin INPUT
+  pinMode(IR_CAMERA, INPUT);     // sensor pin INPUT
+  pinMode(IR_ARM, INPUT);        // sensor pin INPUT
+  pinMode(IR_IN_FEEDER, INPUT);  // sensor pin INPUT
+
+  pinMode(FEEDER_RELAY, OUTPUT);  // RELAY PIN
+  digitalWrite(FEEDER_RELAY, HIGH);
+
+  gripper.attach(32);  // attaches the servo on pin 9 to the servo object
+
+  stepperY.setMaxSpeed(500);
+  // stepperY.setSpeed(300);
+  stepperY.setAcceleration(500);
+  stepperY.setEnablePin(56);
+  stepperY.setPinsInverted(false, false, true);
+  stepperY.enableOutputs();
+
+  stepperX.setMaxSpeed(500);
+  //stepperX.setSpeed(300);
+  stepperX.setAcceleration(500);
+  stepperX.setEnablePin(38);
+  stepperX.setPinsInverted(false, false, true);
+  stepperX.enableOutputs();
+
+  stepperZ.setMaxSpeed(400);
+  //stepperZ.setSpeed(500);
+  stepperZ.setAcceleration(100);
+  stepperZ.setEnablePin(62);
+  stepperZ.setPinsInverted(false, false, true);
+  stepperZ.enableOutputs();
+
+  conveyor.setMaxSpeed(100);
+  // conveyor.setSpeed(500);
+  conveyor.setAcceleration(200);
+  conveyor.setEnablePin(24);
+  conveyor.setPinsInverted(false, false, true);
+  conveyor.enableOutputs();
+  //MoveHome();
+  for (pos = 20; pos >= 0; pos -= 1) {  // goes from 180 degrees to 0 degrees
+    gripper.write(pos);                 // tell servo to go to position in variable 'pos'
+    delay(15);                          // waits 15 ms for the servo to reach the position
+  }
+  xTaskCreate(ARM, "Task 5", 100, NULL, 5, NULL);
+  xTaskCreate(CONV2, "Task 4", 100, NULL, 4, NULL);
+  xTaskCreate(CONV1, "Task 2", 100, NULL, 2, NULL);
+  xTaskCreate(FEEDER, "Task 1", 100, NULL, 1, NULL);
+  xTaskCreate(CAMERA, "Task 3", 100, NULL, 3, NULL);
+
+  CONV2_ARM_semaphore = xSemaphoreCreateBinary();
+  CONV1_CAMERA_semaphore = xSemaphoreCreateBinary();
+  CAMERA_CONV2_semaphore = xSemaphoreCreateBinary();
+  FEEDER_CONV1_semaphore = xSemaphoreCreateBinary();
+
+  interruptSemaphoreON = xSemaphoreCreateBinary();
+  // interruptSemaphoreOFF = xSemaphoreCreateBinary();
+
+  if (interruptSemaphoreON != NULL) {
+    // Attach interrupt for Arduino digital pin
+    attachInterrupt(digitalPinToInterrupt(3), interruptHandlerON, HIGH);
+  }
+
+  // if (interruptSemaphoreOFF != NULL) {
+  //   // Attach interrupt for Arduino digital pin
+  //   attachInterrupt(digitalPinToInterrupt(2), interruptHandlerOFF, LOW);
+  // }
+
+  /////////////////Cube POSITION
+  POS[0][0][0] = 800;  //Product 1
+  POS[0][0][1] = 450;
+  POS[0][1][0] = 800;  //Product 2
+  POS[0][1][1] = 800;
+  POS[0][2][0] = 1100;  //Product 3
+  POS[0][2][1] = 450;
+  POS[0][3][0] = 1100;  //Product 4
+  POS[0][3][1] = 800;
+
+  /////////////////Cylinder POSITION
+  POS[1][0][0] = 800;  //Product 1
+  POS[1][0][1] = 1100;
+  POS[1][1][0] = 800;  //Product 2
+  POS[1][1][1] = 1400;
+  POS[1][2][0] = 1050;  //Product 3
+  POS[1][2][1] = 1100;
+  POS[1][3][0] = 1050;  //Product 4
+  POS[1][3][1] = 1400;
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+}
+
+void MoveHome() {
+  ////////////////////////////////////////////////////////////////////Home X//////////////////////////////////////////////////////////////////////////////////////
+  //Home X
+
+  int y = -1;
+  //Untill Switch Limit is Hit
+  //MOVE LEFT
+  while (digitalRead(X_MIN_PIN) == 0) {
+    stepperY.moveTo(y);
+    stepperX.moveTo(y);
+    y--;
+    stepperX.run();
+    stepperY.run();
+  }
+
+  stepperY.setCurrentPosition(0);
+  stepperX.setCurrentPosition(0);
+
+  stepperY.setMaxSpeed(500);
+  // stepperY.setSpeed(300);
+  stepperY.setAcceleration(1000);
+
+  stepperX.setMaxSpeed(500);
+  // stepperX.setSpeed(300);
+  stepperX.setAcceleration(1000);
+
+  y = +1;
+  delay(500);
+  //Untill Switch Limit is NOT Hit
+  //while (digitalRead(X_MIN_PIN) == 1) {
+  stepperY.moveTo(130);
+  stepperX.moveTo(130);
+
+  while (stepperY.distanceToGo() != 0) {
+    stepperY.run();
+    stepperX.run();
+  }
+
+  stepperY.setCurrentPosition(0);
+  stepperX.setCurrentPosition(0);
+  delay(2000);
+
+  stepperY.setMaxSpeed(500);
+  // stepperY.setSpeed(300);
+  stepperY.setAcceleration(500);
+
+  stepperX.setMaxSpeed(500);
+  // stepperX.setSpeed(300);
+  stepperX.setAcceleration(500);
+
+  ///////////////////////////////////////////////////////////////////Home Y///////////////////////////////////////////////////////////////////////////////////////
+  //Home Y
+
+  int x = 1;
+  //Untill Switch Limit is Hit
+  //MOVE FRONT
+  while (digitalRead(Y_MIN_PIN) == 0) {
+    stepperY.moveTo(x);
+    stepperX.moveTo(-1 * x);
+    x++;
+    stepperX.run();
+    stepperY.run();
+  }
+
+  stepperY.setCurrentPosition(0);
+  stepperX.setCurrentPosition(0);
+
+  stepperY.setMaxSpeed(500);
+  //  stepperY.setSpeed(100);
+  stepperY.setAcceleration(500);
+
+  stepperX.setMaxSpeed(100);
+  //stepperX.setSpeed(100);
+  stepperX.setAcceleration(500);
+
+
+  x = -1;
+  //Untill Switch Limit is NOT Hit
+  while (digitalRead(Y_MIN_PIN) == 1) {
+    stepperY.moveTo(x);
+    stepperX.moveTo(-1 * x);
+    x--;
+    stepperX.run();
+    stepperY.run();
+  }
+
+  ///////////////////////////////////////////////////////////////////Home Z///////////////////////////////////////////////////////////////////////////////////////
+  //Home Z
+  
+  int z = -1;
+  //Untill Switch Limit is Hit
+  //MOVE DOWN
+  if (Home_state_z == 0) {
+    while (digitalRead(Z_MIN_PIN) == 0) {
+      stepperZ.moveTo(z);
+      z--;
+      stepperZ.run();
+    }
+    Home_state_z=1;
+    stepperZ.setCurrentPosition(0);
+
+
+    //stepperZ.stop();
+    //   for (int pos = 20; pos >= 0; pos -= 1) { // goes from 180 degrees to 0 degrees
+    //   myservo.write(pos);              // tell servo to go to position in variable 'pos'
+    //   delay(15);                       // waits 15 ms for the servo to reach the position
+    // }
+    // stepperZ.setMaxSpeed(100);
+    // stepperZ.setSpeed(100);
+
+    //z=-1;
+    //Untill Switch Limit is NOT Hit
+    // while(digitalRead(Z_MIN_PIN)==1){
+    // stepperZ.moveTo(z);
+    // z--;
+    // stepperZ.run();
+    // }
+    stepperZ.setMaxSpeed(1000);
+    stepperZ.setSpeed(100);
+    stepperZ.setAcceleration(200);
+
+
+    stepperZ.moveTo(7500);
+    stepperZ.runToPosition();
+    stepperZ.setCurrentPosition(0);
+  }
+  // int zz=0;
+  //    while(zz >=-9000){
+  //      zz--;
+  //    stepperZ.run();
+  //   }
+  stepperY.setCurrentPosition(0);
+  stepperX.setCurrentPosition(0);
+}
+
+void Drop(int Xpos, int Ypos) {
+  stepperZ.setCurrentPosition(0);
+  stepperY.setCurrentPosition(0);
+  stepperX.setCurrentPosition(0);
+  ////////////////////////////////////////////////////////////////Gripper Close//////////////////////////////////////////////////////////////////////////////////////////////////
+ if (Product == CUBE) {
+    for (int pos = 2; pos <= 35; pos += 1) {  // goes from 0 degrees to 180 degrees
+      // in steps of 1 degree
+      gripper.write(pos);  // tell servo to go to position in variable 'pos'
+      delay(15);           // waits 15 ms for the servo to reach the position
+    }
+  } else {
+    for (int pos = 2; pos <= 25; pos += 1) {  // goes from 0 degrees to 180 degrees
+      // in steps of 1 degree
+      gripper.write(pos);  // tell servo to go to position in variable 'pos'
+      delay(15);           // waits 15 ms for the servo to reach the position
+    }
+  }
+  ////////////////////////////////////////////////////////////////Position Z//////////////////////////////////////////////////////////////////////////////////////////////////
+  stepperZ.setMaxSpeed(1000);
+  //stepperZ.setSpeed(100);
+  stepperZ.setAcceleration(2000);
+
+
+  stepperZ.moveTo(-2000);
+  stepperZ.runToPosition();
+  if(stepperZ.distanceToGo() !=0){
+  stepperZ.run();
+  }
+  ////////////////////////////////////////////////////////////////Position Y//////////////////////////////////////////////////////////////////////////////////////////////////
+  stepperY.setCurrentPosition(0);
+  stepperX.setCurrentPosition(0);
+  stepperY.setMaxSpeed(500);
+  //stepperY.setSpeed(100);
+  stepperY.setAcceleration(500);
+
+  stepperX.setMaxSpeed(500);
+  // stepperX.setSpeed(100);
+  stepperX.setAcceleration(500);
+
+  stepperY.moveTo(-1 * Ypos);
+  stepperX.moveTo(1 * Ypos);
+
+  while (stepperY.distanceToGo() != 0) {
+    stepperY.run();
+    stepperX.run();
+  }
+
+  // stepperY.run();
+  // stepperX.run();
+
+  stepperY.setCurrentPosition(0);
+  stepperX.setCurrentPosition(0);
+
+  stepperY.setMaxSpeed(500);
+  // stepperY.setSpeed(100);
+  stepperY.setAcceleration(500);
+
+  stepperX.setMaxSpeed(500);
+  //  stepperX.setSpeed(100);
+  stepperX.setAcceleration(500);
+  delay(1000);
+
+  ////////////////////////////////////////////////////////////////Position X//////////////////////////////////////////////////////////////////////////////////////////////////
+  stepperY.moveTo(Xpos);
+  stepperX.moveTo(Xpos);
+
+  while (stepperX.distanceToGo() != 0) {
+    stepperY.run();
+    stepperX.run();
+  }
+  // stepperY.run();
+  // stepperX.run();
+  ////////////////////////////////////////////////////////////////Position Z//////////////////////////////////////////////////////////////////////////////////////////////////
+ 
+  stepperZ.moveTo(0);
+  stepperZ.runToPosition();
+  ////////////////////////////////////////////////////////////////Gripper Open//////////////////////////////////////////////////////////////////////////////////////////////////
+  if (Product == CUBE) {
+    for (int pos = 35; pos >= 2; pos -= 1) {  // goes from 180 degrees to 0 degrees
+      gripper.write(pos);                     // tell servo to go to position in variable 'pos'
+      delay(1);                              // waits 15 ms for the servo to reach the position
+    }
+  } else {
+    for (int pos = 25; pos >= 2; pos -= 1) {  // goes from 180 degrees to 0 degrees
+      gripper.write(pos);                     // tell servo to go to position in variable 'pos'
+      delay(11);                              // waits 15 ms for the servo to reach the position
+    }
+ }
+}
+
+void CheckToSend(int Product_Type, int Counter_Type) {
+  if (Product_Type == CUBE) {
+    if (Counter_Type == 0) {
+      Sender("cube 1");
+    } else if (Counter_Type == 1) {
+      Sender("cube 2");
+    } else if (Counter_Type == 2) {
+      Sender("cube 3");
+    } else if (Counter_Type == 3) {
+      Sender("cube 4");
+    }
+  } else {
+    if (Counter_Type == 0) {
+      Sender("cylinder 1");
+    } else if (Counter_Type == 1) {
+      Sender("cylinder 2");
+    } else if (Counter_Type == 2) {
+      Sender("cylinder 3");
+    } else if (Counter_Type == 3) {
+      Sender("cylinder 4");
+    }
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////TASKS////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+void interruptHandlerON() {
+  /**
+   * Give semaphore in the interrupt handler
+   * https://www.freertos.org/a00124.html
+   */
+  //   Serial.println("suspended");
+  //  // Sender("suspended");
+
+  //   vTaskSuspendAll();
+  //xSemaphoreGiveFromISR(interruptSemaphore, NULL);
+  while (digitalRead(2) == 1) {
+    // Serial.println("suspended");
+  }
+}
+
+// void interruptHandlerOFF() {
+//   /**
+//    * Give semaphore in the interrupt handler
+//    * https://www.freertos.org/a00124.html
+//    */
+//   Serial.println("Resumed");
+//  // Sender("Resumed");
+
+//   xTaskResumeAll();
+//   //xSemaphoreGiveFromISR(interruptSemaphore, NULL);
+// }
+
+void FEEDER(void* ptr) {
+  //  Sender("FEEDER");
+
+  while (1) {
+    //  Serial.println("FEEDER ON");
+    // textToSend[] = "FEEDER";
+    //  while (digitalRead (IR_FEEDER)==1  &&digitalRead (IR_IN_FEEDER)==1 ){
+    //Serial.write("feeding");
+   
+   // digitalWrite(FEEDER_RELAY, HIGH);
+   // if(digitalRead(IR_IN_FEEDER)==0){
+    Sender("FEEDER ");
+    while (digitalRead(IR_FEEDER) == 1) {
+      //Serial.println("FEEDEING");
+      //digitalWrite(FEEDER_RELAY, LOW);  // RELAY ON
+                                        //    Serial.println("feeding");
+   // }
+    // Sender("FEEDER ");
+
+    //     while(digitalRead (IR_FEEDER)==1){
+    //       //    Serial.println("FEED");
+
+     }
+    //  Serial.println("FEEDER OFF");
+
+
+    digitalWrite(FEEDER_RELAY, HIGH);  // RELAY OFF
+    xSemaphoreGive(FEEDER_CONV1_semaphore);
+    }
+    }
+//  }
+
+
+void CONV1(void* ptr) {
+  // Sender("CONV1");
+
+  while (1) {
+    xSemaphoreTake(FEEDER_CONV1_semaphore, portMAX_DELAY);
+    //  Serial.println("CONV1");
+    // textToSend[] = "CONV1";
+    // Sender("CONV1");
+    // Serial.write("CONV1");
+    //enable=1;
+    conveyor.setCurrentPosition(0);
+
+    conveyor.setMaxSpeed(100);
+    // conveyor.setSpeed(500);
+    conveyor.setAcceleration(10);
+    int con = 1;
+
+    while (digitalRead(IR_CAMERA) == 1) {
+      //  CONVEYOR_ON(0.5/20);
+      //
+      // Serial.print("CONV1");
+      conveyor.moveTo(con);
+      con++;
+      conveyor.run();
+    }
+    //     Serial.write("hi");
+
+    // Serial.println("CONv onnnnnnnnn");
+    // CONVEYOR_OFF();
+    conveyor.setMaxSpeed(100);
+    // conveyor.setSpeed(500);
+    conveyor.setAcceleration(200);
+    xSemaphoreGive(CONV1_CAMERA_semaphore);
+  }
+}
+
+
+void CAMERA(void* ptr) {
+  // Sender("CAMERA");
+
+  while (1) {
+
+    xSemaphoreTake(CONV1_CAMERA_semaphore, portMAX_DELAY);
+    // Serial.println("CAMERA");
+    // textToSend[] = "CAMERA";
+    // vTaskDelay(5000/portTICK_PERIOD_MS);
+    
+    State = 1;
+    Sender("CAMERA ");
+    //Serial.write("CAMERA");
+
+    while (State == 1) {
+      if (Serial.available() > 0) {
+        // Sender("CAMERA");
+
+        incomingByte = Serial.readStringUntil('\n');
+        while (incomingByte == "Nothing") {
+         Serial.write("Waiting");
+          delay(1500);
+          incomingByte = Serial.readStringUntil('\n');
+        }
+        if (incomingByte == "Rect") {
+          // State = 1;
+
+          //digitalWrite(LED_BUILTIN, HIGH);
+
+          Serial.write("CUBE");
+
+          Product = CUBE;
+          Cube_counter++;
+          CheckToSend(CUBE, Cube_counter);
+          // Serial.write(Product);
+
+          State = 0;
+        }
+
+        else if (incomingByte == "Circle") {
+
+          //digitalWrite(LED_BUILTIN, LOW);
+
+          Serial.write("CYLINDER");
+          Product = CYLINDER;
+          Cylinder_counter++;
+          //Serial.write(Product);
+          CheckToSend(CYLINDER, Cylinder_counter);
+
+          State = 0;
+          //  State = 0;
+        }
+
+        // else if (incomingByte == "Nothing"){
+
+        //  //Serial.write("invald input");
+        //  State = 2;
+
+        // }
+
+        // if(State == 1){
+        //   digitalWrite(LED_BUILTIN, HIGH);
+
+        //   Serial.write("Led on");
+        //   //delay(1500);
+        // }
+        // else if(State == 0){
+        //   digitalWrite(LED_BUILTIN, LOW);
+
+        //   Serial.write("Led off");
+        //   //delay(1500);
+        // }
+        // else if(State == 2){
+
+        //   Serial.write("Waiting");
+        //   //delay(1500);
+        // }
+      }
+    }
+
+    xSemaphoreGive(CAMERA_CONV2_semaphore);
+  }
+  // }//
+  //}
+}
+void CONV2(void* ptr) {
+  //Sender("CONV2");
+
+  while (1) {
+
+    xSemaphoreTake(CAMERA_CONV2_semaphore, portMAX_DELAY);
+    // Serial.println("CONV2");
+    //Serial.println("CAMERA");
+    // textToSend[] = "CONV2";
+
+    conveyor.setCurrentPosition(0);
+
+    conveyor.setMaxSpeed(100);
+    // conveyor.setSpeed(500);
+    conveyor.setAcceleration(10);
+    int con1 = 1;
+    // Sender("CONV2");
+
+    while (digitalRead(IR_ARM) == 1) {
+      // CONVEYOR_ON(0.5/20);
+      conveyor.moveTo(con1);
+      con1++;
+      conveyor.run();
+    }
+    //CONVEYOR_OFF();
+    // Serial.println("CONV OFF");
+    conveyor.setMaxSpeed(100);
+    //conveyor.setSpeed(500);
+    conveyor.setAcceleration(10);
+    xSemaphoreGive(CONV2_ARM_semaphore);
+  }
+}
+
+void ARM(void* ptr) {
+  //  Sender("ARM");
+
+  while (1) {
+
+    xSemaphoreTake(CONV2_ARM_semaphore, portMAX_DELAY);
+    // Serial.println("ARM");
+    // char textToSend[] = "ARM";
+
+    Sender("HOMING");
+
+    MoveHome();
+     //   enable=0;
+
+    //Serial.write(Product);
+   Sender("DROPING");
+
+    if (Product == CUBE) {
+      Drop(POS[CUBE][Cube_counter][1], POS[CUBE][Cube_counter][0]);
+    } else {
+      Drop(POS[CYLINDER][Cylinder_counter][1], POS[CYLINDER][Cylinder_counter][0]);
+    }
+  }
+  // Serial.println("dropppppppppppp");
+  //Move_Home(0.5/20);
+
+  //  Serial.println("HOMING");
+  // Move_Home(0.5);
+}
